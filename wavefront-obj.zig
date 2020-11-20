@@ -102,17 +102,33 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
     };
     errdefer model.deinit();
 
+    try model.positions.ensureCapacity(10_000);
+    try model.normals.ensureCapacity(10_000);
+    try model.textureCoordinates.ensureCapacity(10_000);
+    try model.faces.ensureCapacity(10_000);
+    try model.objects.ensureCapacity(100);
+
     // note:
     // this may look like a dangling pointer as ArrayList changes it's pointers when resized.
     // BUT: the pointer will be changed with the added element, so it will not dangle
     var currentObject: ?*Object = null;
 
     while (true) {
-        var line = stream.readUntilDelimiterAlloc(allocator, '\n', 1024) catch |err| switch (err) {
+        var line: []const u8 = stream.readUntilDelimiterAlloc(allocator, '\n', 1024) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
         };
         defer allocator.free(line);
+
+        line = std.mem.trim(u8, line, " \r\n\t");
+        if (line.len == 0)
+            continue;
+
+        errdefer {
+            std.debug.print("error parsing line: '{}'\n", .{
+                line,
+            });
+        }
 
         // parse comments
         if (std.mem.startsWith(u8, line, "#")) {
@@ -214,13 +230,28 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         }
         // parse material application
         else if (std.mem.startsWith(u8, line, "usemtl ")) {
-            if (currentObject) |obj| {
-                if (obj.material != null)
-                    return error.InvalidFormat;
+            if (currentObject) |*obj| {
+                if (obj.*.material != null) {
+                    // duplicate object when two materials per object
+                    const current_name = obj.*.name;
+                    obj.* = try model.objects.addOne();
+                    obj.*.start = model.faces.items.len;
+                    obj.*.count = 0;
+                    obj.*.name = std.mem.dupe(allocator, u8, current_name) catch |err| {
+                        _ = model.objects.pop(); // remove last element, then error
+                        return err;
+                    };
+                }
 
-                obj.material = try std.mem.dupe(allocator, u8, line[7..]);
+                obj.*.material = try std.mem.dupe(allocator, u8, line[7..]);
             } else {
-                return error.InvalidFormat;
+                currentObject = try model.objects.addOne();
+                currentObject.?.start = model.faces.items.len;
+                currentObject.?.count = 0;
+                currentObject.?.name = std.mem.dupe(allocator, u8, "unnamed") catch |err| {
+                    _ = model.objects.pop(); // remove last element, then error
+                    return err;
+                };
             }
         }
         // parse smoothing groups
