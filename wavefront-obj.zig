@@ -1,6 +1,8 @@
 const std = @import("std");
 const zlm = @import("zlm");
 
+const log = std.log.scoped(.wavefront_obj);
+
 const vec2 = zlm.vec2;
 const vec3 = zlm.vec3;
 const vec4 = zlm.vec4;
@@ -34,22 +36,6 @@ pub const Object = struct {
     count: usize,
 };
 
-pub const Color = struct {
-    r: f32,
-    g: f32,
-    b: f32,
-};
-
-pub const Material = struct {
-    ambient_texture: ?[]const u8 = null,
-    diffuse_texture: ?[]const u8 = null,
-    specular_texture: ?[]const u8 = null,
-
-    ambient_color: ?Color = null,
-    diffuse_color: ?Color = null,
-    specular_color: ?Color = null,
-};
-
 pub const Model = struct {
     const Self = @This();
 
@@ -61,7 +47,6 @@ pub const Model = struct {
     textureCoordinates: []Vec3,
     faces: []Face,
     objects: []Object,
-    materials: std.StringHashMap(Material),
 
     pub fn deinit(self: *Self) void {
         self.allocator.free(self.positions);
@@ -69,7 +54,6 @@ pub const Model = struct {
         self.allocator.free(self.textureCoordinates);
         self.allocator.free(self.faces);
         self.allocator.free(self.objects);
-        self.materials.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -104,7 +88,10 @@ pub fn loadFile(allocator: *std.mem.Allocator, path: []const u8) !Model {
     return load(allocator, file.inStream());
 }
 
-pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
+pub fn load(
+    allocator: *std.mem.Allocator,
+    stream: anytype,
+) !Model {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
@@ -119,9 +106,6 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
     var objects = std.ArrayList(Object).init(allocator);
     defer objects.deinit();
 
-    var materials = std.StringHashMap(Material).init(allocator);
-    errdefer materials.deinit();
-
     try positions.ensureCapacity(10_000);
     try normals.ensureCapacity(10_000);
     try textureCoordinates.ensureCapacity(10_000);
@@ -133,30 +117,19 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
     // BUT: the pointer will be changed with the added element, so it will not dangle
     var currentObject: ?*Object = null;
 
-    while (true) {
-        var line: []const u8 = stream.readUntilDelimiterAlloc(allocator, '\n', 1024) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => return err,
-        };
-        defer allocator.free(line);
+    var line_reader = lineIterator(allocator, stream);
+    defer line_reader.deinit();
 
-        line = std.mem.trim(u8, line, " \r\n\t");
-        if (line.len == 0)
-            continue;
-
+    while (try line_reader.next()) |line| {
         errdefer {
-            std.debug.print("error parsing line: '{}'\n", .{
+            log.err("error parsing line: '{}'", .{
                 line,
             });
         }
 
-        // parse comments
-        if (std.mem.startsWith(u8, line, "#")) {
-            continue;
-        }
         // parse vertex
-        else if (std.mem.startsWith(u8, line, "v ")) {
-            var iter = std.mem.split(line[2..], " ");
+        if (std.mem.startsWith(u8, line, "v ")) {
+            var iter = std.mem.tokenize(line[2..], " ");
             var state: u32 = 0;
             var vertex = vec4(0, 0, 0, 1);
             while (iter.next()) |part| {
@@ -175,7 +148,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         }
         // parse uv coords
         else if (std.mem.startsWith(u8, line, "vt ")) {
-            var iter = std.mem.split(line[3..], " ");
+            var iter = std.mem.tokenize(line[3..], " ");
             var state: u32 = 0;
             var texcoord = vec3(0, 0, 0);
             while (iter.next()) |part| {
@@ -193,7 +166,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         }
         // parse normals
         else if (std.mem.startsWith(u8, line, "vn ")) {
-            var iter = std.mem.split(line[3..], " ");
+            var iter = std.mem.tokenize(line[3..], " ");
             var state: u32 = 0;
             var normal = vec3(0, 0, 0);
             while (iter.next()) |part| {
@@ -211,7 +184,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         }
         // parse faces
         else if (std.mem.startsWith(u8, line, "f ")) {
-            var iter = std.mem.split(line[2..], " ");
+            var iter = std.mem.tokenize(line[2..], " ");
             var state: u32 = 0;
 
             var vertices = std.ArrayList(Vertex).init(&arena.allocator);
@@ -257,6 +230,10 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
                 if (obj.*.material != null) {
                     // duplicate object when two materials per object
                     const current_name = obj.*.name;
+
+                    // terminate object
+                    obj.*.count = faces.items.len - obj.*.start;
+
                     obj.* = try objects.addOne();
                     obj.*.start = faces.items.len;
                     obj.*.count = 0;
@@ -281,7 +258,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         else if (std.mem.startsWith(u8, line, "s ")) {
             // and just ignore them :(
         } else {
-            std.debug.warn("read line: {}\n", .{line});
+            log.warn("unrecognized line: {}", .{line});
         }
     }
 
@@ -299,7 +276,184 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
         .textureCoordinates = textureCoordinates.toOwnedSlice(),
         .faces = faces.toOwnedSlice(),
         .objects = objects.toOwnedSlice(),
+    };
+}
 
+pub const Color = struct {
+    r: f32,
+    g: f32,
+    b: f32,
+};
+
+pub const Material = struct {
+    ambient_texture: ?[]const u8 = null,
+    diffuse_texture: ?[]const u8 = null,
+    specular_texture: ?[]const u8 = null,
+
+    ambient_color: ?Color = null,
+    diffuse_color: ?Color = null,
+    specular_color: ?Color = null,
+};
+
+pub const MaterialLibrary = struct {
+    const Self = @This();
+
+    arena: std.heap.ArenaAllocator,
+    materials: std.StringHashMap(Material),
+
+    pub fn deinit(self: *Self) void {
+        self.materials.deinit();
+        self.arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn loadMaterials(allocator: *std.mem.Allocator, stream: anytype) !MaterialLibrary {
+    var materials = std.StringHashMap(Material).init(allocator);
+    errdefer materials.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    var line_reader = lineIterator(allocator, stream);
+    defer line_reader.deinit();
+
+    var current_mtl: ?*Material = null;
+
+    while (try line_reader.next()) |line| {
+        errdefer {
+            log.err("error parsing line: '{}'\n", .{
+                line,
+            });
+        }
+
+        if (std.mem.startsWith(u8, line, "newmtl ")) {
+            const mtl_name = try arena.allocator.dupe(u8, line[7..]);
+
+            const gop = try materials.getOrPut(mtl_name);
+            if (gop.found_existing) {
+                log.err("duplicate material name: '{}'", .{mtl_name});
+                return error.DuplicateMaterial;
+            }
+
+            gop.entry.value = Material{};
+            current_mtl = &gop.entry.value;
+        } else if (std.mem.startsWith(u8, line, "Ka ")) {
+            if (current_mtl) |mtl| {
+                mtl.ambient_color = try parseColor(line[3..]);
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else if (std.mem.startsWith(u8, line, "Kd ")) {
+            if (current_mtl) |mtl| {
+                mtl.diffuse_color = try parseColor(line[3..]);
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else if (std.mem.startsWith(u8, line, "Ks ")) {
+            if (current_mtl) |mtl| {
+                mtl.specular_color = try parseColor(line[3..]);
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else if (std.mem.startsWith(u8, line, "map_Ka")) {
+            if (current_mtl) |mtl| {
+                mtl.ambient_texture = try arena.allocator.dupe(u8, std.mem.trim(u8, line[7..], " \t\r\n"));
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else if (std.mem.startsWith(u8, line, "map_Kd")) {
+            if (current_mtl) |mtl| {
+                mtl.diffuse_texture = try arena.allocator.dupe(u8, std.mem.trim(u8, line[7..], " \t\r\n"));
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else if (std.mem.startsWith(u8, line, "map_Ks")) {
+            if (current_mtl) |mtl| {
+                mtl.specular_texture = try arena.allocator.dupe(u8, std.mem.trim(u8, line[7..], " \t\r\n"));
+            } else {
+                log.err("missing newmtl!", .{});
+                return error.InvalidFormat;
+            }
+        } else {
+            log.warn("unrecognized line: '{}'", .{line});
+        }
+    }
+
+    return MaterialLibrary{
+        .arena = arena,
         .materials = materials,
+    };
+}
+
+fn parseColor(line: []const u8) !Color {
+    var iterator = std.mem.tokenize(line, " ");
+
+    var result = Color{
+        .r = undefined,
+        .g = undefined,
+        .b = undefined,
+    };
+
+    var index: usize = 0;
+    while (iterator.next()) |tok| : (index += 1) {
+        switch (index) {
+            0 => result.r = try std.fmt.parseFloat(f32, tok),
+            1 => result.g = try std.fmt.parseFloat(f32, tok),
+            2 => result.b = try std.fmt.parseFloat(f32, tok),
+            else => return error.InvalidFormat,
+        }
+    }
+    if (index < 3)
+        return error.InvalidFormat;
+    return result;
+}
+
+fn LineIterator(comptime Reader: type) type {
+    return struct {
+        const Self = @This();
+
+        reader: Reader,
+        buffer: std.ArrayList(u8),
+
+        pub fn deinit(self: *Self) void {
+            self.buffer.deinit();
+            self.* = undefined;
+        }
+
+        pub fn next(self: *Self) !?[]const u8 {
+            while (true) {
+                self.reader.readUntilDelimiterArrayList(&self.buffer, '\n', 4096) catch |err| switch (err) {
+                    error.EndOfStream => return null,
+                    else => return err,
+                };
+
+                var line: []const u8 = self.buffer.items;
+
+                // remove comments
+                if (std.mem.indexOf(u8, line, "#")) |idx| {
+                    line = line[0..idx];
+                }
+
+                // strip trailing/leading whites
+                line = std.mem.trim(u8, line, " \r\n\t");
+                if (line.len == 0) {
+                    continue;
+                }
+                return line;
+            }
+        }
+    };
+}
+
+fn lineIterator(allocator: *std.mem.Allocator, reader: anytype) LineIterator(@TypeOf(reader)) {
+    return LineIterator(@TypeOf(reader)){
+        .reader = reader,
+        .buffer = std.ArrayList(u8).init(allocator),
     };
 }
