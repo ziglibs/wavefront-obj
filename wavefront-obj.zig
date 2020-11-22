@@ -24,8 +24,7 @@ pub const Vertex = struct {
 };
 
 pub const Face = struct {
-    vertices: [4]Vertex, // support up to 4 vertices per face (so tris and quads)
-    count: usize = 0,
+    vertices: []Vertex,
 };
 
 pub const Object = struct {
@@ -35,30 +34,44 @@ pub const Object = struct {
     count: usize,
 };
 
+pub const Color = struct {
+    r: f32,
+    g: f32,
+    b: f32,
+};
+
+pub const Material = struct {
+    ambient_texture: ?[]const u8 = null,
+    diffuse_texture: ?[]const u8 = null,
+    specular_texture: ?[]const u8 = null,
+
+    ambient_color: ?Color = null,
+    diffuse_color: ?Color = null,
+    specular_color: ?Color = null,
+};
+
 pub const Model = struct {
     const Self = @This();
 
-    positions: std.ArrayList(Vec4),
-    normals: std.ArrayList(Vec3),
-    textureCoordinates: std.ArrayList(Vec3),
-    faces: std.ArrayList(Face),
-    objects: std.ArrayList(Object),
-
     allocator: *std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
-    pub fn deinit(self: Self) void {
-        self.positions.deinit();
-        self.normals.deinit();
-        self.textureCoordinates.deinit();
-        self.faces.deinit();
+    positions: []Vec4,
+    normals: []Vec3,
+    textureCoordinates: []Vec3,
+    faces: []Face,
+    objects: []Object,
+    materials: std.StringHashMap(Material),
 
-        for (self.objects.items) |obj| {
-            self.allocator.free(obj.name);
-            if (obj.material) |mtl| {
-                self.allocator.free(mtl);
-            }
-        }
-        self.objects.deinit();
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.positions);
+        self.allocator.free(self.normals);
+        self.allocator.free(self.textureCoordinates);
+        self.allocator.free(self.faces);
+        self.allocator.free(self.objects);
+        self.materials.deinit();
+        self.arena.deinit();
+        self.* = undefined;
     }
 };
 
@@ -92,21 +105,28 @@ pub fn loadFile(allocator: *std.mem.Allocator, path: []const u8) !Model {
 }
 
 pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
-    var model = Model{
-        .positions = std.ArrayList(Vec4).init(allocator),
-        .normals = std.ArrayList(Vec3).init(allocator),
-        .textureCoordinates = std.ArrayList(Vec3).init(allocator),
-        .faces = std.ArrayList(Face).init(allocator),
-        .objects = std.ArrayList(Object).init(allocator),
-        .allocator = allocator,
-    };
-    errdefer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
 
-    try model.positions.ensureCapacity(10_000);
-    try model.normals.ensureCapacity(10_000);
-    try model.textureCoordinates.ensureCapacity(10_000);
-    try model.faces.ensureCapacity(10_000);
-    try model.objects.ensureCapacity(100);
+    var positions = std.ArrayList(Vec4).init(allocator);
+    defer positions.deinit();
+    var normals = std.ArrayList(Vec3).init(allocator);
+    defer normals.deinit();
+    var textureCoordinates = std.ArrayList(Vec3).init(allocator);
+    defer textureCoordinates.deinit();
+    var faces = std.ArrayList(Face).init(allocator);
+    defer faces.deinit();
+    var objects = std.ArrayList(Object).init(allocator);
+    defer objects.deinit();
+
+    var materials = std.StringHashMap(Material).init(allocator);
+    errdefer materials.deinit();
+
+    try positions.ensureCapacity(10_000);
+    try normals.ensureCapacity(10_000);
+    try textureCoordinates.ensureCapacity(10_000);
+    try faces.ensureCapacity(10_000);
+    try objects.ensureCapacity(100);
 
     // note:
     // this may look like a dangling pointer as ArrayList changes it's pointers when resized.
@@ -151,7 +171,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
             }
             if (state < 3) // v x y z w, with x,y,z are required, w is optional
                 return error.InvalidFormat;
-            try model.positions.append(vertex);
+            try positions.append(vertex);
         }
         // parse uv coords
         else if (std.mem.startsWith(u8, line, "vt ")) {
@@ -169,7 +189,7 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
             }
             if (state < 1) // vt u v w, with u is required, v and w are optional
                 return error.InvalidFormat;
-            try model.textureCoordinates.append(texcoord);
+            try textureCoordinates.append(texcoord);
         }
         // parse normals
         else if (std.mem.startsWith(u8, line, "vn ")) {
@@ -187,37 +207,40 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
             }
             if (state < 3) // vn i j k, with i,j,k are required, none are optional
                 return error.InvalidFormat;
-            try model.normals.append(normal);
+            try normals.append(normal);
         }
         // parse faces
         else if (std.mem.startsWith(u8, line, "f ")) {
             var iter = std.mem.split(line[2..], " ");
             var state: u32 = 0;
-            var face: Face = undefined;
+
+            var vertices = std.ArrayList(Vertex).init(&arena.allocator);
+            defer vertices.deinit();
+
             while (iter.next()) |part| {
-                switch (state) {
-                    0...3 => face.vertices[state] = try parseVertexSpec(part),
-                    else => return error.InvalidFormat,
-                }
+                const vert = try parseVertexSpec(part);
+                try vertices.append(vert);
                 state += 1;
             }
-            if (state < 3) // less than 3 faces is an error (no line or point support)
+            if (vertices.items.len < 3) // less than 3 faces is an error (no line or point support)
                 return error.InvalidFormat;
-            face.count = state;
-            try model.faces.append(face);
+
+            try faces.append(Face{
+                .vertices = vertices.toOwnedSlice(),
+            });
         }
         // parse objects
         else if (std.mem.startsWith(u8, line, "o ")) {
             if (currentObject) |obj| {
                 // terminate object
-                obj.count = model.faces.items.len - obj.start;
+                obj.count = faces.items.len - obj.start;
             }
-            var obj = try model.objects.addOne();
+            var obj = try objects.addOne();
 
-            obj.start = model.faces.items.len;
+            obj.start = faces.items.len;
             obj.count = 0;
-            obj.name = std.mem.dupe(allocator, u8, line[2..]) catch |err| {
-                _ = model.objects.pop(); // remove last element, then error
+            obj.name = arena.allocator.dupe(u8, line[2..]) catch |err| {
+                _ = objects.pop(); // remove last element, then error
                 return err;
             };
 
@@ -234,22 +257,22 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
                 if (obj.*.material != null) {
                     // duplicate object when two materials per object
                     const current_name = obj.*.name;
-                    obj.* = try model.objects.addOne();
-                    obj.*.start = model.faces.items.len;
+                    obj.* = try objects.addOne();
+                    obj.*.start = faces.items.len;
                     obj.*.count = 0;
-                    obj.*.name = std.mem.dupe(allocator, u8, current_name) catch |err| {
-                        _ = model.objects.pop(); // remove last element, then error
+                    obj.*.name = arena.allocator.dupe(u8, current_name) catch |err| {
+                        _ = objects.pop(); // remove last element, then error
                         return err;
                     };
                 }
 
-                obj.*.material = try std.mem.dupe(allocator, u8, line[7..]);
+                obj.*.material = try arena.allocator.dupe(u8, line[7..]);
             } else {
-                currentObject = try model.objects.addOne();
-                currentObject.?.start = model.faces.items.len;
+                currentObject = try objects.addOne();
+                currentObject.?.start = faces.items.len;
                 currentObject.?.count = 0;
-                currentObject.?.name = std.mem.dupe(allocator, u8, "unnamed") catch |err| {
-                    _ = model.objects.pop(); // remove last element, then error
+                currentObject.?.name = arena.allocator.dupe(u8, "unnamed") catch |err| {
+                    _ = objects.pop(); // remove last element, then error
                     return err;
                 };
             }
@@ -264,8 +287,19 @@ pub fn load(allocator: *std.mem.Allocator, stream: anytype) !Model {
 
     // terminate object if any
     if (currentObject) |obj| {
-        obj.count = model.faces.items.len - obj.start;
+        obj.count = faces.items.len - obj.start;
     }
 
-    return model;
+    return Model{
+        .allocator = allocator,
+        .arena = arena,
+
+        .positions = positions.toOwnedSlice(),
+        .normals = normals.toOwnedSlice(),
+        .textureCoordinates = textureCoordinates.toOwnedSlice(),
+        .faces = faces.toOwnedSlice(),
+        .objects = objects.toOwnedSlice(),
+
+        .materials = materials,
+    };
 }
