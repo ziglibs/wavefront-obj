@@ -122,7 +122,7 @@ pub fn load(
 
     while (try line_reader.next()) |line| {
         errdefer {
-            log.err("error parsing line: '{}'", .{
+            log.err("error parsing line: '{s}'", .{
                 line,
             });
         }
@@ -258,7 +258,7 @@ pub fn load(
         else if (std.mem.startsWith(u8, line, "s ")) {
             // and just ignore them :(
         } else {
-            log.warn("unrecognized line: {}", .{line});
+            log.warn("unrecognized line: {s}", .{line});
         }
     }
 
@@ -322,7 +322,7 @@ pub fn loadMaterials(allocator: *std.mem.Allocator, stream: anytype) !MaterialLi
 
     while (try line_reader.next()) |line| {
         errdefer {
-            log.err("error parsing line: '{}'\n", .{
+            log.err("error parsing line: '{s}'\n", .{
                 line,
             });
         }
@@ -332,7 +332,7 @@ pub fn loadMaterials(allocator: *std.mem.Allocator, stream: anytype) !MaterialLi
 
             const gop = try materials.getOrPut(mtl_name);
             if (gop.found_existing) {
-                log.err("duplicate material name: '{}'", .{mtl_name});
+                log.err("duplicate material name: '{s}'", .{mtl_name});
                 return error.DuplicateMaterial;
             }
 
@@ -381,7 +381,7 @@ pub fn loadMaterials(allocator: *std.mem.Allocator, stream: anytype) !MaterialLi
                 return error.InvalidFormat;
             }
         } else {
-            log.warn("unrecognized line: '{}'", .{line});
+            log.warn("unrecognized line: '{s}'", .{line});
         }
     }
 
