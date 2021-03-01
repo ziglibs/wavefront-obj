@@ -252,6 +252,8 @@ pub fn load(
                     _ = objects.pop(); // remove last element, then error
                     return err;
                 };
+
+                currentObject.?.material = try arena.allocator.dupe(u8, line[7..]);
             }
         }
         // parse smoothing groups
