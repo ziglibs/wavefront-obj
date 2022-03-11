@@ -39,7 +39,7 @@ pub const Object = struct {
 pub const Model = struct {
     const Self = @This();
 
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
     positions: []Vec4,
@@ -66,7 +66,7 @@ fn parseVertexSpec(spec: []const u8) !Vertex {
         .textureCoordinate = null,
     };
 
-    var iter = std.mem.split(spec, "/");
+    var iter = std.mem.split(u8, spec, "/");
     var state: u32 = 0;
     while (iter.next()) |part| {
         switch (state) {
@@ -81,15 +81,15 @@ fn parseVertexSpec(spec: []const u8) !Vertex {
     return vertex;
 }
 
-pub fn loadFile(allocator: *std.mem.Allocator, path: []const u8) !Model {
-    var file = try std.fs.File.openRead(path);
+pub fn loadFile(allocator: std.mem.Allocator, path: []const u8) !Model {
+    var file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
     defer file.close();
 
-    return load(allocator, file.inStream());
+    return load(allocator, file.reader());
 }
 
 pub fn load(
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     stream: anytype,
 ) !Model {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -106,11 +106,11 @@ pub fn load(
     var objects = std.ArrayList(Object).init(allocator);
     defer objects.deinit();
 
-    try positions.ensureCapacity(10_000);
-    try normals.ensureCapacity(10_000);
-    try textureCoordinates.ensureCapacity(10_000);
-    try faces.ensureCapacity(10_000);
-    try objects.ensureCapacity(100);
+    try positions.ensureTotalCapacity(10_000);
+    try normals.ensureTotalCapacity(10_000);
+    try textureCoordinates.ensureTotalCapacity(10_000);
+    try faces.ensureTotalCapacity(10_000);
+    try objects.ensureTotalCapacity(100);
 
     // note:
     // this may look like a dangling pointer as ArrayList changes it's pointers when resized.
@@ -129,7 +129,7 @@ pub fn load(
 
         // parse vertex
         if (std.mem.startsWith(u8, line, "v ")) {
-            var iter = std.mem.tokenize(line[2..], " ");
+            var iter = std.mem.tokenize(u8, line[2..], " ");
             var state: u32 = 0;
             var vertex = vec4(0, 0, 0, 1);
             while (iter.next()) |part| {
@@ -148,7 +148,7 @@ pub fn load(
         }
         // parse uv coords
         else if (std.mem.startsWith(u8, line, "vt ")) {
-            var iter = std.mem.tokenize(line[3..], " ");
+            var iter = std.mem.tokenize(u8, line[3..], " ");
             var state: u32 = 0;
             var texcoord = vec3(0, 0, 0);
             while (iter.next()) |part| {
@@ -166,7 +166,7 @@ pub fn load(
         }
         // parse normals
         else if (std.mem.startsWith(u8, line, "vn ")) {
-            var iter = std.mem.tokenize(line[3..], " ");
+            var iter = std.mem.tokenize(u8, line[3..], " ");
             var state: u32 = 0;
             var normal = vec3(0, 0, 0);
             while (iter.next()) |part| {
@@ -184,10 +184,10 @@ pub fn load(
         }
         // parse faces
         else if (std.mem.startsWith(u8, line, "f ")) {
-            var iter = std.mem.tokenize(line[2..], " ");
+            var iter = std.mem.tokenize(u8, line[2..], " ");
             var state: u32 = 0;
 
-            var vertices = std.ArrayList(Vertex).init(&arena.allocator);
+            var vertices = std.ArrayList(Vertex).init(arena.allocator());
             defer vertices.deinit();
 
             while (iter.next()) |part| {
@@ -212,7 +212,7 @@ pub fn load(
 
             obj.start = faces.items.len;
             obj.count = 0;
-            obj.name = arena.allocator.dupe(u8, line[2..]) catch |err| {
+            obj.name = arena.allocator().dupe(u8, line[2..]) catch |err| {
                 _ = objects.pop(); // remove last element, then error
                 return err;
             };
@@ -237,23 +237,23 @@ pub fn load(
                     obj.* = try objects.addOne();
                     obj.*.start = faces.items.len;
                     obj.*.count = 0;
-                    obj.*.name = arena.allocator.dupe(u8, current_name) catch |err| {
+                    obj.*.name = arena.allocator().dupe(u8, current_name) catch |err| {
                         _ = objects.pop(); // remove last element, then error
                         return err;
                     };
                 }
 
-                obj.*.material = try arena.allocator.dupe(u8, line[7..]);
+                obj.*.material = try arena.allocator().dupe(u8, line[7..]);
             } else {
                 currentObject = try objects.addOne();
                 currentObject.?.start = faces.items.len;
                 currentObject.?.count = 0;
-                currentObject.?.name = arena.allocator.dupe(u8, "unnamed") catch |err| {
+                currentObject.?.name = arena.allocator().dupe(u8, "unnamed") catch |err| {
                     _ = objects.pop(); // remove last element, then error
                     return err;
                 };
 
-                currentObject.?.material = try arena.allocator.dupe(u8, line[7..]);
+                currentObject.?.material = try arena.allocator().dupe(u8, line[7..]);
             }
         }
         // parse smoothing groups
@@ -453,7 +453,7 @@ fn LineIterator(comptime Reader: type) type {
     };
 }
 
-fn lineIterator(allocator: *std.mem.Allocator, reader: anytype) LineIterator(@TypeOf(reader)) {
+fn lineIterator(allocator: std.mem.Allocator, reader: anytype) LineIterator(@TypeOf(reader)) {
     return LineIterator(@TypeOf(reader)){
         .reader = reader,
         .buffer = std.ArrayList(u8).init(allocator),
