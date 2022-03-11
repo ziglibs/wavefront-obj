@@ -29,6 +29,10 @@ pub const Face = struct {
     vertices: []Vertex,
 };
 
+pub const Line = struct {
+    vertices: [2]Vertex,
+};
+
 pub const Object = struct {
     name: []const u8,
     material: ?[]const u8,
@@ -46,6 +50,7 @@ pub const Model = struct {
     normals: []Vec3,
     textureCoordinates: []Vec3,
     faces: []Face,
+    lines: []Line,
     objects: []Object,
 
     pub fn deinit(self: *Self) void {
@@ -53,6 +58,7 @@ pub const Model = struct {
         self.allocator.free(self.normals);
         self.allocator.free(self.textureCoordinates);
         self.allocator.free(self.faces);
+        self.allocator.free(self.lines);
         self.allocator.free(self.objects);
         self.arena.deinit();
         self.* = undefined;
@@ -103,6 +109,8 @@ pub fn load(
     defer textureCoordinates.deinit();
     var faces = std.ArrayList(Face).init(allocator);
     defer faces.deinit();
+    var lines = std.ArrayList(Line).init(allocator);
+    defer lines.deinit();
     var objects = std.ArrayList(Object).init(allocator);
     defer objects.deinit();
 
@@ -110,21 +118,20 @@ pub fn load(
     try normals.ensureTotalCapacity(10_000);
     try textureCoordinates.ensureTotalCapacity(10_000);
     try faces.ensureTotalCapacity(10_000);
+    try lines.ensureTotalCapacity(10_000);
     try objects.ensureTotalCapacity(100);
 
     // note:
     // this may look like a dangling pointer as ArrayList changes it's pointers when resized.
     // BUT: the pointer will be changed with the added element, so it will not dangle
-    var currentObject: ?*Object = null;
+    var current_object: ?*Object = null;
 
     var line_reader = lineIterator(allocator, stream);
     defer line_reader.deinit();
 
     while (try line_reader.next()) |line| {
         errdefer {
-            log.err("error parsing line: '{s}'", .{
-                line,
-            });
+            log.err("error parsing line: '{s}'", .{line});
         }
 
         // parse vertex
@@ -202,9 +209,29 @@ pub fn load(
                 .vertices = vertices.toOwnedSlice(),
             });
         }
+        // parse lines
+        else if (std.mem.startsWith(u8, line, "l ")) {
+            var iter = std.mem.tokenize(u8, line[2..], " ");
+            var state: u32 = 0;
+
+            var vertices = std.ArrayList(Vertex).init(arena.allocator());
+            defer vertices.deinit();
+
+            while (iter.next()) |part| {
+                const vert = try parseVertexSpec(part);
+                try vertices.append(vert);
+                state += 1;
+            }
+            if (vertices.items.len != 2) // Each line is always 2 vertices.
+                return error.InvalidFormat;
+
+            try lines.append(Line{
+                .vertices = vertices.items[0..2].*,
+            });
+        }
         // parse objects
         else if (std.mem.startsWith(u8, line, "o ")) {
-            if (currentObject) |obj| {
+            if (current_object) |obj| {
                 // terminate object
                 obj.count = faces.items.len - obj.start;
             }
@@ -217,7 +244,7 @@ pub fn load(
                 return err;
             };
 
-            currentObject = obj;
+            current_object = obj;
         }
         // parse material libraries
         else if (std.mem.startsWith(u8, line, "mtllib ")) {
@@ -226,7 +253,7 @@ pub fn load(
         }
         // parse material application
         else if (std.mem.startsWith(u8, line, "usemtl ")) {
-            if (currentObject) |*obj| {
+            if (current_object) |*obj| {
                 if (obj.*.material != null) {
                     // duplicate object when two materials per object
                     const current_name = obj.*.name;
@@ -245,15 +272,15 @@ pub fn load(
 
                 obj.*.material = try arena.allocator().dupe(u8, line[7..]);
             } else {
-                currentObject = try objects.addOne();
-                currentObject.?.start = faces.items.len;
-                currentObject.?.count = 0;
-                currentObject.?.name = arena.allocator().dupe(u8, "unnamed") catch |err| {
+                current_object = try objects.addOne();
+                current_object.?.start = faces.items.len;
+                current_object.?.count = 0;
+                current_object.?.name = arena.allocator().dupe(u8, "unnamed") catch |err| {
                     _ = objects.pop(); // remove last element, then error
                     return err;
                 };
 
-                currentObject.?.material = try arena.allocator().dupe(u8, line[7..]);
+                current_object.?.material = try arena.allocator().dupe(u8, line[7..]);
             }
         }
         // parse smoothing groups
@@ -265,7 +292,7 @@ pub fn load(
     }
 
     // terminate object if any
-    if (currentObject) |obj| {
+    if (current_object) |obj| {
         obj.count = faces.items.len - obj.start;
     }
 
@@ -277,6 +304,7 @@ pub fn load(
         .normals = normals.toOwnedSlice(),
         .textureCoordinates = textureCoordinates.toOwnedSlice(),
         .faces = faces.toOwnedSlice(),
+        .lines = lines.toOwnedSlice(),
         .objects = objects.toOwnedSlice(),
     };
 }
