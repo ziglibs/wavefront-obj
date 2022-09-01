@@ -11,7 +11,7 @@ const Vec2 = zlm.Vec2;
 const Vec3 = zlm.Vec3;
 const Vec4 = zlm.Vec4;
 
-test "" {
+test "wavefront-obj" {
     std.testing.refAllDecls(@This());
 }
 
